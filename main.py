@@ -57,10 +57,7 @@ def execute_query(query: str, params=None, fetchall=False):
     cursor = conn.cursor()
     cursor.execute(query, params)
     conn.commit()
-    if fetchall:
-        result = cursor.fetchall()
-    else:
-        result = None
+    result = cursor.fetchall() if fetchall else None
     close_db_connection(conn)
     return result
 
