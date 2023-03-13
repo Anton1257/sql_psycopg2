@@ -1,184 +1,142 @@
-import configparser
 import psycopg2
 
 
-def get_config(config_file: str) -> configparser.ConfigParser:
-    """
-    Функция читает конфигурационный файл и возвращает объект ConfigParser
-    :param config_file: путь до .ini файла с параметрами(пароль и т.д.):
-    :return: config
-    """
-    config = configparser.ConfigParser()
-    config.read(config_file)
-    return config
-
-
-def get_client_id(search_term: str) -> str:
-    """
-    Функция возвращает идентификатор клиента
-    :param search_term: данные клиента по которым искать в БД - имя, фамилия, email или номер телефона
-    :return: client_id - идентификатор клиента
-    """
-    return find_client(search_term)[0][0]
-
-
-def connect_to_db(config: configparser.ConfigParser) -> psycopg2.connect:
-    """
-    Функция соединения с БД, возвращает объект - соединение
-    :return: conn
-    """
-    conn = psycopg2.connect(
-        host=config['postgresql']['host'],
-        database=config['postgresql']['database'],
-        user=config['postgresql']['user'],
-        password=config['postgresql']['password']
-    )
-    return conn
-
-
-def close_db_connection(conn: psycopg2.connect):
-    """
-    Функция закрывает соединение с БД
-    :param conn: объект соединение который надо закрыть
-    """
-    conn.close()
-
-
-def execute_query(query: str, params=None, fetchall=False):
-    from pathlib import Path
-    """
-    Функция создаёт соединение, делает запрос к БД, делает коммит, закрывает соединение и возвращает результат
-    :param query: sql запрос к базе данных
-    :param params: параметры запроса
-    :param fetchall: ...
-    :return: ...
-    """
-    conn = connect_to_db(get_config(f'{str(Path.home())}/config.ini'))
-    cursor = conn.cursor()
-    cursor.execute(query, params)
-    conn.commit()
-    result = cursor.fetchall() if fetchall else None
-    close_db_connection(conn)
-    return result
-
-
-def create_table_clients():
-    """
-    Функция создаёт таблицу clients
-    """
-    query = """
+def create_db(cur):
+    # Создаем таблицу "clients"
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS clients (
-            client_id SERIAL PRIMARY KEY,
-            first_name TEXT NOT NULL,
-            last_name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            phone TEXT
+            id SERIAL PRIMARY KEY,
+            first_name VARCHAR(255) NOT NULL,
+            last_name VARCHAR(255) NOT NULL,
+            email VARCHAR(255) NOT NULL
         );
-    """
-    execute_query(query)
+    """)
+
+    # Создаем таблицу "phones"
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS phones (
+            id SERIAL PRIMARY KEY,
+            client_id INTEGER NOT NULL REFERENCES clients(id),
+            phone_number VARCHAR(255) NOT NULL
+        );
+    """)
 
 
-def add_client(first_name: str, last_name: str, email: str, phone: str):
-    """
-    Функция добавляет запись о клиенте в БД если его ещё в ней нет или пишет что клиент уже есть в БД
-    :param first_name: ...
-    :param last_name: ...
-    :param email: ...
-    :param phone: ...
-    """
-    query = """
-        INSERT INTO clients (first_name, last_name, email, phone)
-        VALUES(%s, %s, %s, %s)
-    """
-    try:
-        execute_query(query, (first_name, last_name, email, phone))
-    except psycopg2.IntegrityError:
-        print("Клиент с таким email уже существует.")
+def add_client(cur, first_name, last_name, email, phones=None):
+    cur.execute(
+        "INSERT INTO clients (first_name, last_name, email) VALUES (%s, %s, %s) RETURNING id",
+        (first_name, last_name, email)
+    )
+    client_id = cur.fetchone()[0]
+    if phones:
+        for phone in phones:
+            cur.execute(
+                "INSERT INTO phones (client_id, phone_number) VALUES (%s, %s)",
+                (client_id, phone)
+            )
 
 
-def add_phone(client_id: str, phone: str):
-    """
-    Функция добавляет номер телефона клиента
-    :param client_id: ...
-    :param phone: ...
-    """
-    query = """
-        UPDATE clients SET phone=%s
-        WHERE client_id=%s
-    """
-    execute_query(query, (phone, client_id))
+def add_phone(cur, client_id, phone):
+    cur.execute(
+        "INSERT INTO phones (client_id, phone_number) VALUES (%s, %s)",
+        (client_id, phone)
+    )
 
 
-def update_client(client_id: str, first_name=None, last_name=None, email=None, phone=None):
-    """
-    Функция изменяет/обновляет запись о клиенте
-    :param client_id: ...
-    :param first_name: ...
-    :param last_name: ...
-    :param email: ...
-    :param phone: ...
-    """
-    query = """
-        UPDATE clients SET first_name=%s, last_name=%s, email=%s, phone=%s
-        WHERE client_id=%s
-    """
-    execute_query(query, (first_name, last_name, email, phone, client_id))
+def change_client(cur, client_id, first_name=None, last_name=None, email=None, phones=None):
+    set_clause = []
+    values = []
+    if first_name is not None:
+        set_clause.append("first_name = %s")
+        values.append(first_name)
+    if last_name is not None:
+        set_clause.append("last_name = %s")
+        values.append(last_name)
+    if email is not None:
+        set_clause.append("email = %s")
+        values.append(email)
+    if set_clause:
+        set_clause = ", ".join(set_clause)
+        values.append(client_id)
+        cur.execute(f"UPDATE clients SET {set_clause} WHERE id = %s", values)
+
+    if phones is not None:
+        cur.execute("DELETE FROM phones WHERE client_id = %s", (client_id,))
+        for phone in phones:
+            cur.execute("INSERT INTO phones (client_id, phone_number) VALUES (%s, %s)", (client_id, phone))
 
 
-def delete_phone(client_id: str):
-    """
-    Функция удаляет номер телефона клиента
-    :param client_id: ...
-    """
-    query = """
-        UPDATE clients SET phone=NULL
-        WHERE client_id=%s
-    """
-    execute_query(query, (client_id,))
+def delete_phone(cur, client_id, phone):
+    cur.execute("DELETE FROM phones WHERE client_id = %s AND phone_number = %s", (client_id, phone))
 
 
-def delete_client(client_id: str):
-    """
-    Функция удаляет клиента из БД
-    :param client_id: ...
-    """
-    query = """
-        DELETE FROM clients
-        WHERE client_id=%s
-    """
-    execute_query(query, (client_id,))
+def delete_client(cur, client_id):
+    cur.execute("DELETE FROM clients WHERE id = %s", (client_id,))
 
 
-def find_client(search_term: str) -> list:
-    """
-    Функция ищет клиента в БД
-    :param search_term: имя, фамилия, email или телефон клиента
-    :return: result - список клиентов
-    """
-    query = """
-        SELECT * FROM clients
-        WHERE first_name=%s OR last_name=%s OR email=%s OR phone=%s
-    """
-    result = execute_query(query, (search_term, search_term, search_term, search_term), fetchall=True)
-    return result
+def find_client(cur, first_name=None, last_name=None, email=None, phone=None):
+    conditions = []
+    values = []
+    if first_name is not None:
+        conditions.append("first_name = %s")
+        values.append(first_name)
+    if last_name is not None:
+        conditions.append("last_name = %s")
+        values.append(last_name)
+    if email is not None:
+        conditions.append("email = %s")
+        values.append(email)
+    if phone is not None:
+        conditions.append("phones.phone_number = %s")
+        values.append(phone)
+
+    if not conditions:
+        cur.execute("""
+            SELECT clients.id, first_name, last_name, email, array_agg(phone_number) AS phones
+            FROM clients LEFT JOIN phones ON clients.id = phones.client_id
+            GROUP BY clients.id
+        """)
+    else:
+        conditions = " AND ".join(conditions)
+        query = f"""
+            SELECT clients.id, first_name, last_name, email, array_agg(phone_number) AS phones
+            FROM clients LEFT JOIN phones ON clients.id = phones.client_id
+            WHERE {conditions}
+            GROUP BY clients.id
+        """
+        cur.execute(query, values)
+
+    rows = cur.fetchall()
+    clients = []
+    for row in rows:
+        client = {
+            "id": row[0],
+            "first_name": row[1],
+            "last_name": row[2],
+            "email": row[3],
+            "phones": row[4] or []
+        }
+        clients.append(client)
+
+    return clients
 
 
-def main():
-    # создаём таблицу clients
-    create_table_clients()
-    # добавляем клиента
-    add_client('Иванов', 'Иван', 'ivanov@yandex.ru', '')
-    # получаем идентификатор клиента
-    client_id = get_client_id('ivanov@yandex.ru')
-    # добавляем номер телефона клиента
-    add_phone(client_id, '+7 999-987-65-43')
-    # удаляем номер телефона клиента
-    delete_phone(client_id)
-    # изменяем запись клиента
-    update_client(client_id, 'Иванов', 'Иван', 'ivan.ivanov@yandex.ru', '+7 901-234-56-781')
-    # удаляем клиента
-    delete_client(client_id)
+with psycopg2.connect(host='localhost', database="clients_db7", user="postgres", password="pgAdminpass") as conn:
+    # Создание таблиц
+    create_db(conn.cursor())
+    # Добавление клиента
+    add_client(conn.cursor(), "Андрей", "Петров", "abc123@yandex.ru", phones=["555-1234", "555-5678"])
+    # Поиск клиента
+    client = find_client(conn.cursor(), "Андрей", "Петров", "abc123@yandex.ru", "555-1234")
+    # Получение client_id
+    client_id = client[0]['id']
+    # Добавление телефона клиента
+    add_phone(conn.cursor(), client_id, "543-2112")
+    # Изменение данных клиента
+    change_client(conn.cursor(), client_id, phones=['123-4567'])
+    # Удаление номера телефона клиента
+    delete_phone(conn.cursor(), client_id, '555-1234')
+    # Удаление клиента
+    delete_client(conn.cursor(), client_id)
 
-
-if __name__ == "__main__":
-    main()
+conn.close()
